@@ -150,10 +150,12 @@ async function writeGzippedLines(lines, dest) {
 }
 
 async function downloadWithRetry(url, dest) {
-  const total = await getContentLength(url);
+  const total = await probeTotalSize(url);
   if (!total) {
+    log("Could not determine total size; falling back to whole-file download.");
     return downloadWhole(url, dest);
   }
+  log(`Total size: ${(total / 1024 / 1024).toFixed(1)} MB; chunked download.`);
   await fs.mkdir(path.dirname(dest), { recursive: true });
   const fh = await fs.open(dest, "w");
   try {
@@ -173,7 +175,16 @@ async function downloadWithRetry(url, dest) {
   }
 }
 
-async function getContentLength(url) {
+async function probeTotalSize(url) {
+  // Try HEAD first — cheapest. If the origin doesn't return Content-Length on
+  // HEAD (some IIS / WAF setups don't), fall back to a 1-byte Range GET and
+  // read Content-Range.
+  const fromHead = await tryHead(url);
+  if (fromHead) return fromHead;
+  return tryRangeProbe(url);
+}
+
+async function tryHead(url) {
   const ctrl = new AbortController();
   const t = setTimeout(() => ctrl.abort(), 30_000);
   try {
@@ -183,12 +194,65 @@ async function getContentLength(url) {
       redirect: "follow",
       signal: ctrl.signal,
     });
-    if (!res.ok) return null;
+    if (!res.ok) {
+      log(`HEAD probe: HTTP ${res.status}`);
+      return null;
+    }
     const len = res.headers.get("content-length");
-    if (!len) return null;
+    if (!len) {
+      log("HEAD probe: no Content-Length in response.");
+      return null;
+    }
     const n = Number.parseInt(len, 10);
     return Number.isFinite(n) && n > 0 ? n : null;
-  } catch {
+  } catch (err) {
+    log(`HEAD probe failed: ${err?.message ?? err}`);
+    return null;
+  } finally {
+    clearTimeout(t);
+  }
+}
+
+async function tryRangeProbe(url) {
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), 60_000);
+  try {
+    const res = await fetch(url, {
+      headers: {
+        "User-Agent": "Mozilla/5.0",
+        Accept: "*/*",
+        Range: "bytes=0-0",
+      },
+      redirect: "follow",
+      signal: ctrl.signal,
+    });
+    if (res.status === 206) {
+      const cr = res.headers.get("content-range") ?? "";
+      const m = /\/(\d+)\s*$/.exec(cr);
+      // Read the body to release the connection.
+      await res.arrayBuffer().catch(() => {});
+      if (m) {
+        const n = Number.parseInt(m[1], 10);
+        log(`Range probe: total size ${n} bytes (from Content-Range).`);
+        return Number.isFinite(n) && n > 0 ? n : null;
+      }
+      log(`Range probe: 206 but no Content-Range (header was "${cr}").`);
+      return null;
+    }
+    if (res.status === 200) {
+      const cl = res.headers.get("content-length");
+      await res.arrayBuffer().catch(() => {});
+      if (cl) {
+        const n = Number.parseInt(cl, 10);
+        log(`Range probe: server ignored Range, Content-Length=${n}.`);
+        return Number.isFinite(n) && n > 0 ? n : null;
+      }
+      return null;
+    }
+    log(`Range probe: HTTP ${res.status}`);
+    return null;
+  } catch (err) {
+    log(`Range probe failed: ${err?.message ?? err}`);
     return null;
   } finally {
     clearTimeout(t);
