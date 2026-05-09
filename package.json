@@ -1,0 +1,16 @@
+{
+  "name": "bulkatl",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Weekly refresh of the FBR Active Taxpayer List into a small, sorted, gzipped lookup file published as a GitHub release.",
+  "type": "module",
+  "scripts": {
+    "build": "node scripts/build-atl-data.mjs"
+  },
+  "dependencies": {
+    "xlsx": "^0.18.5"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

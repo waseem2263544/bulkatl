@@ -1,0 +1,76 @@
+name: Refresh FBR ATL
+
+on:
+  schedule:
+    # FBR refreshes the ATL every Monday morning Pakistan time (PKT = UTC+5).
+    # Run at 04:00 UTC (= 09:00 PKT) every Monday.
+    - cron: "0 4 * * 1"
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+concurrency:
+  group: refresh-atl
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Install deps
+        run: npm ci --no-audit --no-fund
+
+      - name: Build ATL data file
+        run: node scripts/build-atl-data.mjs
+        env:
+          NODE_OPTIONS: "--max-old-space-size=6144"
+
+      - name: Stamp release tag
+        id: tag
+        run: |
+          DATE=$(date -u +'%Y-%m-%d')
+          echo "tag=atl-$DATE" >> $GITHUB_OUTPUT
+          echo "name=ATL $DATE" >> $GITHUB_OUTPUT
+
+      - name: Read meta
+        id: meta
+        run: |
+          ROWS=$(jq -r '.rows' dist/atl-meta.json)
+          echo "rows=$ROWS" >> $GITHUB_OUTPUT
+
+      # Re-tag the rolling 'atl-latest' release so the runtime URL never changes.
+      - name: Publish/update rolling release (atl-latest)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          # Delete any prior 'atl-latest' release + tag so we can re-create cleanly.
+          gh release delete atl-latest --yes --cleanup-tag 2>/dev/null || true
+          gh release create atl-latest \
+            dist/atl-ids.txt.gz \
+            dist/atl-meta.json \
+            --title "ATL latest (${{ steps.tag.outputs.tag }})" \
+            --notes "Auto-refreshed FBR ATL — ${{ steps.meta.outputs.rows }} active taxpayers. Source: ${{ env.FBR_ATL_URL || 'https://download.fbr.gov.pk/IT/ATL_IT.xlsx' }}" \
+            --latest=false
+
+      # Also publish a dated release for history.
+      - name: Publish dated release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create ${{ steps.tag.outputs.tag }} \
+            dist/atl-ids.txt.gz \
+            dist/atl-meta.json \
+            --title "${{ steps.tag.outputs.name }}" \
+            --notes "FBR ATL snapshot for ${{ steps.tag.outputs.tag }} — ${{ steps.meta.outputs.rows }} active taxpayers." \
+            --latest \
+          || echo "Dated release ${{ steps.tag.outputs.tag }} already exists; skipping."
