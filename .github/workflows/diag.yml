@@ -6,37 +6,52 @@ on:
 jobs:
   diag:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 8
     steps:
-      - name: Show egress IP and country
-        run: |
-          curl -s --max-time 10 https://api.ipify.org || true
-          echo
-          curl -s --max-time 10 https://ipinfo.io || true
-          echo
+      - name: Egress IP
+        run: curl -s --max-time 10 https://ipinfo.io && echo
 
-      - name: Try resolving FBR
-        run: |
-          getent hosts download.fbr.gov.pk || true
-          getent hosts www.fbr.gov.pk || true
+      - name: Install mtr
+        run: sudo apt-get -qq update && sudo apt-get -qq install -y mtr-tiny dnsutils
 
-      - name: HEAD download.fbr.gov.pk/IT/ATL_IT.xlsx
+      - name: Resolve all FBR hosts
         run: |
-          curl -v -I --max-time 20 -A "Mozilla/5.0" \
-            https://download.fbr.gov.pk/IT/ATL_IT.xlsx 2>&1 | head -40 || true
+          for h in fbr.gov.pk www.fbr.gov.pk download.fbr.gov.pk download1.fbr.gov.pk; do
+            echo "--- $h"
+            getent hosts $h || true
+            dig +short $h || true
+          done
 
-      - name: GET landing page
+      - name: Try FBR homepage (apex + www)
         run: |
-          curl -v --max-time 20 -A "Mozilla/5.0" -o /tmp/landing.html \
-            https://www.fbr.gov.pk/download-atl/132041 2>&1 | tail -25 || true
-          echo "--- size:"
-          wc -c /tmp/landing.html || true
+          for url in https://fbr.gov.pk/ https://www.fbr.gov.pk/; do
+            echo "============ $url"
+            curl -sS -o /dev/null --connect-timeout 15 --max-time 30 \
+              -A "Mozilla/5.0" -w "code=%{http_code} time=%{time_total}\n" "$url" || true
+          done
 
-      - name: GET first 4 KB of the actual file
+      - name: Try download.fbr.gov.pk root
         run: |
-          curl -v --max-time 30 -A "Mozilla/5.0" -r 0-4095 \
-            -o /tmp/head.xlsx \
+          curl -v --connect-timeout 15 --max-time 30 -A "Mozilla/5.0" \
+            https://download.fbr.gov.pk/ 2>&1 | tail -20 || true
+
+      - name: Try the actual file (HEAD)
+        run: |
+          curl -v --connect-timeout 15 --max-time 30 -I -A "Mozilla/5.0" \
             https://download.fbr.gov.pk/IT/ATL_IT.xlsx 2>&1 | tail -25 || true
-          echo "--- size:"
-          wc -c /tmp/head.xlsx || true
-          file /tmp/head.xlsx || true
+
+      - name: Try the actual file (GET, byte 0)
+        run: |
+          curl -v --connect-timeout 15 --max-time 45 -A "Mozilla/5.0" \
+            -r 0-1023 -o /tmp/probe.bin \
+            https://download.fbr.gov.pk/IT/ATL_IT.xlsx 2>&1 | tail -25 || true
+          echo "size: $(wc -c </tmp/probe.bin 2>/dev/null || echo 0)"
+
+      - name: Try download1 (mirror)
+        run: |
+          curl -v --connect-timeout 15 --max-time 30 -I -A "Mozilla/5.0" \
+            https://download1.fbr.gov.pk/IT/ATL_IT.xlsx 2>&1 | tail -25 || true
+
+      - name: traceroute to download.fbr.gov.pk (mtr 1 cycle, TCP/443)
+        run: |
+          sudo mtr -T -P 443 --report --report-cycles 2 download.fbr.gov.pk 2>&1 | tail -30 || true
