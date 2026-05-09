@@ -1,0 +1,42 @@
+name: Diag FBR connectivity
+
+on:
+  workflow_dispatch: {}
+
+jobs:
+  diag:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Show egress IP and country
+        run: |
+          curl -s --max-time 10 https://api.ipify.org || true
+          echo
+          curl -s --max-time 10 https://ipinfo.io || true
+          echo
+
+      - name: Try resolving FBR
+        run: |
+          getent hosts download.fbr.gov.pk || true
+          getent hosts www.fbr.gov.pk || true
+
+      - name: HEAD download.fbr.gov.pk/IT/ATL_IT.xlsx
+        run: |
+          curl -v -I --max-time 20 -A "Mozilla/5.0" \
+            https://download.fbr.gov.pk/IT/ATL_IT.xlsx 2>&1 | head -40 || true
+
+      - name: GET landing page
+        run: |
+          curl -v --max-time 20 -A "Mozilla/5.0" -o /tmp/landing.html \
+            https://www.fbr.gov.pk/download-atl/132041 2>&1 | tail -25 || true
+          echo "--- size:"
+          wc -c /tmp/landing.html || true
+
+      - name: GET first 4 KB of the actual file
+        run: |
+          curl -v --max-time 30 -A "Mozilla/5.0" -r 0-4095 \
+            -o /tmp/head.xlsx \
+            https://download.fbr.gov.pk/IT/ATL_IT.xlsx 2>&1 | tail -25 || true
+          echo "--- size:"
+          wc -c /tmp/head.xlsx || true
+          file /tmp/head.xlsx || true
